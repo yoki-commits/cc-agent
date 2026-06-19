@@ -2,6 +2,7 @@
 最基本的 Agent 框架
 - Client: 封装 LLM API 调用
 - Tool System: 工具注册与执行
+- Hook System: 4 阶段钩子（prompt_submit / pre_tool_use / post_tool_use / stop_loop）
 - AgentLoop: 循环调用 LLM + 工具，直到给出最终回复
 - Main: 主交互入口，管理记忆（对话历史）
 """
@@ -175,7 +176,42 @@ def create_default_tools() -> ToolRegistry:
 
 
 # ============================================================
-# 4. AgentLoop — 循环调用 LLM + 工具执行
+# 4. Hook 系统 — 4 阶段钩子
+# ============================================================
+
+# 可用 hook 阶段
+HOOK_PROMPT_SUBMIT = "prompt_submit"   # 用户提交 prompt，LLM 调用前
+HOOK_PRE_TOOL_USE  = "pre_tool_use"    # 工具执行前
+HOOK_POST_TOOL_USE = "post_tool_use"   # 工具执行后
+HOOK_STOP_LOOP     = "stop_loop"       # 循环结束（得到最终回复或超限）
+
+
+class HookSystem:
+    """可插拔的 hook 管理器"""
+
+    def __init__(self):
+        # 字典列表：每个阶段对应一个 hook 函数列表
+        self._hooks: dict[str, list[Callable]] = {
+            HOOK_PROMPT_SUBMIT: [],
+            HOOK_PRE_TOOL_USE: [],
+            HOOK_POST_TOOL_USE: [],
+            HOOK_STOP_LOOP: [],
+        }
+
+    def add_hook(self, phase: str, hook_fn: Callable) -> None:
+        """将 hook 函数注册到指定阶段"""
+        if phase not in self._hooks:
+            raise ValueError(f"未知 hook 阶段: {phase}")
+        self._hooks[phase].append(hook_fn)
+
+    def trigger(self, phase: str, **kwargs) -> None:
+        """触发指定阶段的所有 hook，传入上下文数据"""
+        for hook_fn in self._hooks.get(phase, []):
+            hook_fn(**kwargs)
+
+
+# ============================================================
+# 5. AgentLoop — 循环调用 LLM + 工具执行
 # ============================================================
 
 class AgentLoop:
@@ -184,9 +220,15 @@ class AgentLoop:
     本身不管理记忆，由外部传入完整 messages。
     """
 
-    def __init__(self, client: LLMClient, tool_registry: ToolRegistry):
+    def __init__(
+        self,
+        client: LLMClient,
+        tool_registry: ToolRegistry,
+        hook_system: HookSystem | None = None,
+    ):
         self.client = client
         self.tools = tool_registry
+        self.hooks = hook_system or HookSystem()
 
     def run(self, messages: list[dict], max_turns: int = 20) -> list[dict]:
         """
@@ -200,6 +242,9 @@ class AgentLoop:
         openai_tools = self.tools.list_openai_tools()
 
         for _ in range(max_turns):
+            # --- hook: prompt_submit（LLM 调用前）---
+            self.hooks.trigger(HOOK_PROMPT_SUBMIT, messages=messages)
+
             response = self.client.chat_completion(
                 messages=messages,
                 tools=openai_tools if openai_tools else None,
@@ -219,8 +264,23 @@ class AgentLoop:
                     except json.JSONDecodeError:
                         func_args = {}
 
+                    # --- hook: pre_tool_use（工具执行前）---
+                    self.hooks.trigger(
+                        HOOK_PRE_TOOL_USE,
+                        tool_name=func_name,
+                        tool_args=func_args,
+                    )
+
                     # 执行工具
                     result = self.tools.execute(func_name, func_args)
+
+                    # --- hook: post_tool_use（工具执行后）---
+                    self.hooks.trigger(
+                        HOOK_POST_TOOL_USE,
+                        tool_name=func_name,
+                        tool_args=func_args,
+                        result=result,
+                    )
 
                     # 将工具结果作为 tool 角色消息追加
                     messages.append({
@@ -231,6 +291,9 @@ class AgentLoop:
                 # 继续循环让模型处理工具结果
                 continue
 
+            # --- hook: stop_loop（循环即将结束）---
+            self.hooks.trigger(HOOK_STOP_LOOP, messages=messages)
+
             # 没有工具调用 → 得到最终回复，结束循环
             return messages
 
@@ -239,11 +302,12 @@ class AgentLoop:
             "role": "assistant",
             "content": "(已达到最大工具调用轮数，请简化你的任务或重试)",
         })
+        self.hooks.trigger(HOOK_STOP_LOOP, messages=messages)
         return messages
 
 
 # ============================================================
-# 5. 主交互入口 — 管理记忆
+# 6. 主交互入口 — 管理记忆
 # ============================================================
 
 def main():

@@ -50,3 +50,24 @@
 
 **提交：** `add hook system`
 
+---
+
+## Phase 4 — 安全审查钩子（三层检查）
+
+**提示词：**
+
+> 我要实现第一个具体钩子函数，把安全审查机制迁移到 pre_tool_use 的 hook 中，agent 循环只负责一句调用，安全系统的设计也独立开，仅把这个功能用一个 add_hook 函数添加到 hook 中，保证各部分低耦合性
+>
+> 安全审查机制：分为三层，第一层硬拒绝层，风险大，如删除系统，删除根目录，关机，重启等命令，用列表列出，要调用工具执行时，直接拒绝；第二层，轻风险命令，要在当前项目目录外操作等情况，也用列表列出，在命中后进入第三层，询问用户是否同意，用户拒绝则拒绝执行
+
+**实现内容：**
+- `SecurityBlocked` 异常 — hook 通过抛出此异常阻止工具执行
+- `SecurityHook` 类 — 三层安全审查：
+  - **第 1 层** — 硬拒绝：`hard_blocked_patterns`（rm -rf /、shutdown、format、userdel 等），直接拦截
+  - **第 2 层** — 检查命令是否操作项目目录外的路径
+  - **第 3 层** — 用户终端确认：`y` 放行，`n`/回车拒绝
+- `AgentLoop` 仅加 `try/except SecurityBlocked` 包围 `tools.execute()`，其余零改动
+- `main()` 中通过 `hooks.add_hook(HOOK_PRE_TOOL_USE, security)` 注册
+
+**提交：** `add security hook - 三层安全审查`
+

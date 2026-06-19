@@ -28,14 +28,14 @@ import requests
 # ============================================================
 
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
-DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+DEEPSEEK_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com")
 
 
 class LLMClient:
     """OpenAI 兼容的 LLM 客户端"""
 
-    def __init__(self, model: str = "deepseek-chat"):
-        self.model = model
+    def __init__(self, model: str | None = None):
+        self.model = model or os.getenv("MODEL_ID", "deepseek-chat")
         self.base_url = DEEPSEEK_BASE_URL
         self.api_key = DEEPSEEK_API_KEY
 

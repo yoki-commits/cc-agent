@@ -11,7 +11,15 @@ import json
 import os
 import re
 import subprocess
+from pathlib import Path
 from typing import Any, Callable
+
+from dotenv import load_dotenv
+
+# 从项目根目录加载 .env 文件
+env_path = Path(__file__).resolve().parent.parent / ".env"
+if env_path.exists():
+    load_dotenv(env_path)
 
 import requests
 

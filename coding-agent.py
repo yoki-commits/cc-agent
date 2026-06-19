@@ -9,6 +9,7 @@
 
 import json
 import os
+import re
 import subprocess
 from typing import Any, Callable
 
@@ -211,6 +212,120 @@ class HookSystem:
 
 
 # ============================================================
+# 4b. 安全审查系统 — 三层检查
+# ============================================================
+
+class SecurityBlocked(Exception):
+    """安全审查拒绝执行，不向 LLM 暴露异常细节"""
+    pass
+
+
+class SecurityHook:
+    """
+    三层安全审查钩子，注册到 pre_tool_use 阶段。
+
+    第 1 层 — 硬拒绝：高风险命令（删除系统、关机等），直接拦截。
+    第 2 层 — 软风险：可能操作项目目录外的文件系统命令。
+    第 3 层 — 用户确认：询问用户是否允许执行。
+    """
+
+    def __init__(self, project_dir: str = "."):
+        self.project_dir = os.path.abspath(project_dir)
+
+        # ── 第 1 层：硬拒绝模式 ──
+        self.hard_blocked_patterns = [
+            # 删除根目录 / 系统
+            "rm -rf /", "rm -rf /*", "rm -rf --no-preserve-root",
+            "rmdir /", "rmdir /s", "del /f /s",
+            # 关机 / 重启
+            "shutdown", "reboot", "halt", "poweroff",
+            "shutdown -s", "shutdown -r", "shutdown /s", "shutdown /r",
+            # 格式化 / 分区
+            "format ", "mkfs", "fdisk", "parted", "mkswap",
+            "format.", "format:",
+            # 危险 dd
+            "dd if=", "dd if=/dev/zero",
+            # 系统权限
+            "chmod 777 /", "chmod -R 777 /",
+            "chmod 777 /", "chmod 7777 ",
+            # 用户管理
+            "userdel", "groupdel", "passwd", "usermod",
+            "net user ", "net localgroup ",
+        ]
+
+        # ── 第 2 层：软风险模式（修改文件系统的操作）──
+        self.soft_risk_patterns = [
+            "rm ", "rmdir ", "del ", "rd ", "erase ",
+            "mv ", "move ", "rename ", "ren ",
+            "cp ", "copy ", "xcopy ", "robocopy ",
+            "chmod ", "chown ", "attrib ", "cacls ", "icacls ",
+            "mkdir ", "md ",
+            "dd ",
+            "truncate ", "fallocate ",
+            "echo.>", "echo >", "echo>>", "type nul>",
+        ]
+
+    def __call__(self, tool_name: str, tool_args: dict, **kwargs):
+        """Hook 入口 — 作为 pre_tool_use 阶段函数注册"""
+        if tool_name != "bash":
+            return
+
+        command = tool_args.get("command", "")
+
+        # ── 第 1 层：硬拒绝 ──
+        for pattern in self.hard_blocked_patterns:
+            if pattern.lower() in command.lower():
+                raise SecurityBlocked(
+                    f"⛔ 安全审查：高风险命令被拒绝（命中了禁止模式: {pattern}）"
+                )
+
+        # ── 第 2 层：检查是否操作项目目录外的路径 ──
+        outside_paths = self._find_outside_paths(command)
+        if not outside_paths:
+            # 不涉及外部路径，软风险模式也忽略
+            return
+
+        # ── 第 3 层：用户确认 ──
+        print(f"\n[安全审查] 以下命令可能操作项目目录外的文件：")
+        print(f"  命令: {command}")
+        print(f"  涉及外部路径: {', '.join(outside_paths)}")
+        while True:
+            resp = input("  是否允许执行？(y/N): ").strip().lower()
+            if resp == "y":
+                print("  → 用户允许，继续执行。")
+                return
+            elif resp in ("n", ""):
+                raise SecurityBlocked(
+                    f"⛔ 安全审查：用户拒绝执行操作外部路径的命令"
+                )
+
+    def _find_outside_paths(self, command: str) -> list[str]:
+        """找出命令中指向项目目录外的路径"""
+        found: list[str] = []
+
+        # 提取被引号括起来的路径、或明显是路径的 token
+        # 匹配：引号路径、以 .\\ ..\\ / \\ 开头的、含盘符的
+        path_tokens = re.findall(
+            r'["\']((?:[a-zA-Z]:)?[\\/][^"\'<>|;]*?)["\']'
+            r'|((?:\.\.?[\\/])[^\s;"\'<>|&]+)'
+            r'|((?:[a-zA-Z]:[\\/])[^\s;"\'<>|&]+)',
+            command,
+        )
+        for groups in path_tokens:
+            token = next(p for p in groups if p)  # 非空匹配组
+            token = token.strip("\"'")
+            try:
+                full = os.path.abspath(os.path.join(self.project_dir, token))
+                common = os.path.commonpath([full, self.project_dir])
+                if common != self.project_dir:
+                    found.append(token)
+            except (ValueError, OSError):
+                continue
+
+        return found
+
+
+# ============================================================
 # 5. AgentLoop — 循环调用 LLM + 工具执行
 # ============================================================
 
@@ -271,8 +386,11 @@ class AgentLoop:
                         tool_args=func_args,
                     )
 
-                    # 执行工具
-                    result = self.tools.execute(func_name, func_args)
+                    # 执行工具（安全审查可能通过 SecurityBlocked 阻止执行）
+                    try:
+                        result = self.tools.execute(func_name, func_args)
+                    except SecurityBlocked as e:
+                        result = str(e)
 
                     # --- hook: post_tool_use（工具执行后）---
                     self.hooks.trigger(
@@ -320,6 +438,11 @@ def main():
     client = LLMClient()
     tools = create_default_tools()
 
+    # 创建安全审查钩子并注册到 pre_tool_use 阶段
+    hooks = HookSystem()
+    security = SecurityHook(project_dir=os.getcwd())
+    hooks.add_hook(HOOK_PRE_TOOL_USE, security)
+
     print("=" * 50)
     print("  Agent 交互终端（输入 'exit' 退出）")
     print("=" * 50)
@@ -336,7 +459,7 @@ def main():
         }
     ]
 
-    agent = AgentLoop(client, tools)
+    agent = AgentLoop(client, tools, hook_system=hooks)
 
     while True:
         try:

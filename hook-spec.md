@@ -121,6 +121,31 @@ hooks.add_hook(HOOK_PRE_TOOL_USE, timing_hook)
 
 ---
 
+## 内置 Hook 参考
+
+以下 hook 已内置在框架中，可直接注册使用。
+
+### `print_tool_use` — 工具执行后打印到终端
+
+注册到 `HOOK_POST_TOOL_USE` 阶段，每次工具执行后打印工具名、参数和结果摘要。
+
+```python
+# 在 main() 中注册即可
+hooks.add_hook(HOOK_POST_TOOL_USE, print_tool_use)
+```
+
+终端输出效果：
+```
+[工具] bash
+  参数: {'command': 'ls -la'}
+  结果: total 8
+drwxr-xr-x 2 user user 4096 ...
+```
+
+函数定义见 `coding-agent.py` 第 222-228 行。
+
+---
+
 ## 安全审查 Hook（参考实现）
 
 安全审查是 `pre_tool_use` 阶段的一个具体 hook 实现，展示了 **带状态的类 hook** 模式：

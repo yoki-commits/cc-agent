@@ -219,6 +219,14 @@ class HookSystem:
             hook_fn(**kwargs)
 
 
+# 内置 hook: 工具执行后打印到终端
+def print_tool_use(tool_name: str, tool_args: dict, result: str, **kwargs):
+    """在终端打印工具名称、参数和结果"""
+    print(f"\n[工具] {tool_name}")
+    print(f"  参数: {tool_args}")
+    print(f"  结果: {result[:200]}{'...' if len(result) > 200 else ''}")
+
+
 # ============================================================
 # 4b. 安全审查系统 — 三层检查
 # ============================================================
@@ -451,6 +459,9 @@ def main():
     hooks = HookSystem()
     security = SecurityHook(project_dir=os.getcwd())
     hooks.add_hook(HOOK_PRE_TOOL_USE, security)
+
+    # hook: 工具执行后打印到终端
+    hooks.add_hook(HOOK_POST_TOOL_USE, print_tool_use)
 
     print("=" * 50)
     print("  Agent 交互终端（输入 'exit' 退出）")

@@ -353,7 +353,7 @@ class AgentLoop:
         self.tools = tool_registry
         self.hooks = hook_system or HookSystem()
 
-    def run(self, messages: list[dict], max_turns: int = 20) -> list[dict]:
+    def run(self, messages: list[dict], max_turns: int = 99) -> list[dict]:
         """
         执行 agent 循环。
         参数:
@@ -388,14 +388,15 @@ class AgentLoop:
                         func_args = {}
 
                     # --- hook: pre_tool_use（工具执行前）---
-                    self.hooks.trigger(
-                        HOOK_PRE_TOOL_USE,
-                        tool_name=func_name,
-                        tool_args=func_args,
-                    )
-
-                    # 执行工具（安全审查可能通过 SecurityBlocked 阻止执行）
+                    # 安全审查可能通过 SecurityBlocked 阻止执行
                     try:
+                        self.hooks.trigger(
+                            HOOK_PRE_TOOL_USE,
+                            tool_name=func_name,
+                            tool_args=func_args,
+                        )
+
+                        # 执行工具
                         result = self.tools.execute(func_name, func_args)
                     except SecurityBlocked as e:
                         result = str(e)

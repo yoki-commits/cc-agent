@@ -361,7 +361,7 @@ class AgentLoop:
         self.tools = tool_registry
         self.hooks = hook_system or HookSystem()
 
-    def run(self, messages: list[dict], max_turns: int = 99) -> list[dict]:
+    def run(self, messages: list[dict], max_turns: int = 200) -> list[dict]:
         """
         执行 agent 循环。
         参数:

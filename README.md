@@ -71,3 +71,22 @@
 
 **提交：** `add security hook - 三层安全审查`
 
+---
+
+## Phase 5 — 任务规划系统
+
+**提示词：**
+
+> 1. 我要新增一个工具 todo_write，让 AI 规划这个任务的步骤为一个字典列表，列表包含任务、状态（等待执行/正在执行/已完成），并且每次更新之后打印出来。
+> 2. 增加提醒机制，在每隔 3 轮没有更新 todo_list 时，下一轮对话注入一句简短的提示词提醒
+
+**实现内容：**
+- `todo_write` 工具 — 接收 JSON 格式任务数组，存储到模块级状态 `_todo_tasks`，终端打印格式化看板
+- **提醒机制**（基于 Hook）：
+  - `todo_reminder_reset` — 注册到 `pre_tool_use`，调用 `todo_write` 时重置计数器
+  - `todo_reminder_check` — 注册到 `prompt_submit`，连续 3 轮未更新则注入一条 user 提醒消息
+- 系统提示词同步更新，告知 AI 可使用 `todo_write`
+- 所有代码零耦合：工具注册到 `create_default_tools()`，提醒逻辑通过 `add_hook()` 接入
+
+**提交：** `新增 todo_write 工具 + 任务更新提醒机制`
+

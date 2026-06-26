@@ -24,6 +24,14 @@ if env_path.exists():
 import requests
 
 # ============================================================
+# 模块级状态
+# ============================================================
+
+# todo 任务列表 & 距上次更新经过的轮数
+_todo_tasks: list[dict] = []
+_turns_since_todo_update = 0
+
+# ============================================================
 # 1. Client — 封装 LLM API 调用
 # ============================================================
 
@@ -156,6 +164,32 @@ def bash_execute(command: str, timeout: int = 30) -> str:
         return f"Error: {e}"
 
 
+def todo_write(tasks_json: str) -> str:
+    """创建或更新任务列表，解析 JSON 后打印到终端"""
+    global _todo_tasks
+    try:
+        tasks = json.loads(tasks_json)
+        if not isinstance(tasks, list):
+            return "Error: 需要传入一个列表"
+        _todo_tasks = tasks
+
+        print("\n" + "=" * 40)
+        print("  📋 任务列表")
+        print("=" * 40)
+        if not _todo_tasks:
+            print("  （空）")
+        else:
+            for i, t in enumerate(_todo_tasks, 1):
+                task = t.get("task", "")
+                status = t.get("status", "pending")
+                icon = {"pending": "⏳", "in_progress": "🔄", "completed": "✅"}.get(status, "⏳")
+                print(f"  {i}. {icon} {task} [{status}]")
+        print("=" * 40)
+        return f"任务列表已更新，共 {len(tasks)} 项"
+    except json.JSONDecodeError as e:
+        return f"Error: JSON 解析失败 - {e}"
+
+
 # 创建默认工具列表
 def create_default_tools() -> ToolRegistry:
     registry = ToolRegistry()
@@ -179,6 +213,22 @@ def create_default_tools() -> ToolRegistry:
             "required": ["command"],
         },
         fn=bash_execute,
+    ))
+
+    registry.register(Tool(
+        name="todo_write",
+        description="创建或更新任务规划列表。接收 JSON 格式的任务数组，每个任务包含 task（描述）和 status（pending/in_progress/completed）。每次更新都会在终端打印当前任务列表。当开始新任务或完成/更新任务进度时，必须调用此工具告知用户。",
+        parameters={
+            "type": "object",
+            "properties": {
+                "tasks_json": {
+                    "type": "string",
+                    "description": "任务列表的 JSON 字符串，格式：[{\"task\": \"描述\", \"status\": \"pending\"}, ...]。status 可选值：pending（等待执行）、in_progress（正在执行）、completed（已完成）",
+                },
+            },
+            "required": ["tasks_json"],
+        },
+        fn=todo_write,
     ))
 
     return registry
@@ -225,6 +275,26 @@ def print_tool_use(tool_name: str, tool_args: dict, result: str, **kwargs):
     print(f"\n[工具] {tool_name}")
     print(f"  参数: {tool_args}")
     print(f"  结果: {result[:200]}{'...' if len(result) > 200 else ''}")
+
+
+# 内置 hook: todo 提醒机制
+def todo_reminder_reset(tool_name: str, **kwargs):
+    """每次调用 todo_write 时重置提醒计数器"""
+    global _turns_since_todo_update
+    if tool_name == "todo_write":
+        _turns_since_todo_update = 0
+
+
+def todo_reminder_check(messages: list[dict], **kwargs):
+    """每轮 LLM 调用前检查——连续 3 轮未更新 todo 则注入提醒"""
+    global _turns_since_todo_update
+    _turns_since_todo_update += 1
+    if _turns_since_todo_update >= 4:
+        messages.append({
+            "role": "user",
+            "content": "（提醒：已有几轮未更新任务列表，建议检查并更新任务进度）",
+        })
+        _turns_since_todo_update = 0
 
 
 # ============================================================
@@ -463,6 +533,10 @@ def main():
     # hook: 工具执行后打印到终端
     hooks.add_hook(HOOK_POST_TOOL_USE, print_tool_use)
 
+    # hook: todo 提醒机制
+    hooks.add_hook(HOOK_PRE_TOOL_USE, todo_reminder_reset)
+    hooks.add_hook(HOOK_PROMPT_SUBMIT, todo_reminder_check)
+
     print("=" * 50)
     print("  Agent 交互终端（输入 'exit' 退出）")
     print("=" * 50)
@@ -474,6 +548,7 @@ def main():
             "role": "system",
             "content": (
                 "你是一个有用的 AI 助手。你可以使用 bash 工具在本地执行 shell 命令来帮助用户。"
+                "你可以使用 todo_write 工具创建和更新任务规划列表，方便用户跟踪进度。"
                 "请根据任务需要自主决定何时使用工具。当任务完成时，给出清晰的总结。"
             ),
         }

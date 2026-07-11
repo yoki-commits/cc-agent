@@ -512,6 +512,52 @@ class AgentLoop:
 
 
 # ============================================================
+# 5b. 子 Agent — 作为母 Agent 的工具调用
+# ============================================================
+
+def run_subagent(task: str) -> str:
+    """启动一个子 Agent 独立完成任务，返回结果摘要"""
+    print(f"\n{'=' * 40}")
+    print(f"  🤖 子 Agent 启动")
+    print(f"  任务: {task}")
+    print(f"{'=' * 40}")
+
+    # 子 Agent 的工具集：包含 bash 和 todo_write，但不包含 subagent 自身（防递归）
+    sub_tools = create_default_tools()
+
+    # 子 Agent 的 hooks：安全审查 + 工具打印
+    sub_hooks = HookSystem()
+    sub_hooks.add_hook(HOOK_PRE_TOOL_USE, SecurityHook(project_dir=os.getcwd()))
+    sub_hooks.add_hook(HOOK_POST_TOOL_USE, print_tool_use)
+
+    sub_client = LLMClient()
+    sub_agent = AgentLoop(sub_client, sub_tools, hook_system=sub_hooks)
+
+    sub_messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是一个子 Agent，负责独立完成委派给你的子任务。"
+                "你可以使用 bash 工具执行 shell 命令，使用 todo_write 管理步骤。"
+                "专注完成当前任务，完成后输出清晰的结果总结。"
+                "不要询问用户，独立决策并执行。"
+            ),
+        },
+        {"role": "user", "content": task},
+    ]
+
+    try:
+        sub_messages = sub_agent.run(sub_messages, max_turns=30)
+        result = sub_messages[-1].get("content", "(无输出)")
+        print(f"\n{'=' * 40}")
+        print(f"  🤖 子 Agent 完成")
+        print(f"{'=' * 40}")
+        return result
+    except Exception as e:
+        return f"子 Agent 执行出错: {e}"
+
+
+# ============================================================
 # 6. 主交互入口 — 管理记忆
 # ============================================================
 
@@ -524,6 +570,23 @@ def main():
 
     client = LLMClient()
     tools = create_default_tools()
+
+    # 注册子 Agent 工具（放在 create_default_tools() 之外，因为子 Agent 不能递归调用自身）
+    tools.register(Tool(
+        name="subagent",
+        description="启动一个子 Agent 独立完成指定的子任务。子 Agent 拥有 bash 和 todo_write 工具，可自主规划、执行并返回结果。适用于将复杂任务拆解后并行委派子 Agent 处理的场景。",
+        parameters={
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "委派给子 Agent 的具体任务描述，越详细越好",
+                },
+            },
+            "required": ["task"],
+        },
+        fn=run_subagent,
+    ))
 
     # 创建安全审查钩子并注册到 pre_tool_use 阶段
     hooks = HookSystem()
@@ -549,6 +612,7 @@ def main():
             "content": (
                 "你是一个有用的 AI 助手。你可以使用 bash 工具在本地执行 shell 命令来帮助用户。"
                 "你可以使用 todo_write 工具创建和更新任务规划列表，方便用户跟踪进度。"
+                "你可以使用 subagent 工具将子任务委派给子 Agent 独立执行，适用于需要并行处理的多步骤任务。"
                 "请根据任务需要自主决定何时使用工具。当任务完成时，给出清晰的总结。"
             ),
         }

@@ -22,6 +22,7 @@ if env_path.exists():
     load_dotenv(env_path)
 
 import requests
+import yaml
 
 # ============================================================
 # 模块级状态
@@ -232,6 +233,54 @@ def create_default_tools() -> ToolRegistry:
     ))
 
     return registry
+
+
+# ============================================================
+# Skills 目录路径
+# ============================================================
+
+SKILLS_DIR = Path(__file__).resolve().parent / "skills"
+
+
+def scan_skills() -> dict[str, dict]:
+    """扫描 skills 目录，返回 {name: {name, description, content}}"""
+    skills: dict[str, dict] = {}
+    if not SKILLS_DIR.exists():
+        return skills
+
+    for skill_dir in SKILLS_DIR.iterdir():
+        if not skill_dir.is_dir():
+            continue
+        skill_file = skill_dir / "skill.md"
+        if not skill_file.exists():
+            continue
+
+        text = skill_file.read_text(encoding="utf-8")
+        parts = text.split("---", 2)
+        if len(parts) < 3:
+            continue
+
+        frontmatter = yaml.safe_load(parts[1])
+        name = frontmatter.get("name", skill_dir.name)
+        description = frontmatter.get("description", "")
+        content = parts[2].strip()
+
+        skills[name] = {
+            "name": name,
+            "description": description,
+            "content": content,
+        }
+
+    return skills
+
+
+def load_skill(name: str) -> str:
+    """加载指定 skill 的全文内容，注入到对话上下文"""
+    all_skills = scan_skills()
+    skill = all_skills.get(name)
+    if skill is None:
+        return f"Error: 技能 '{name}' 不存在。可用技能: {', '.join(all_skills.keys())}"
+    return f"## 技能: {skill['name']}\n\n{skill['content']}"
 
 
 # ============================================================
@@ -571,6 +620,30 @@ def main():
     client = LLMClient()
     tools = create_default_tools()
 
+    # --- Skill 系统 ---
+    all_skills = scan_skills()
+    skills_list = ", ".join(all_skills.keys()) if all_skills else "(无)"
+    # 生成技能列表描述，注入系统提示词
+    skill_descriptions = "\n".join(
+        f"  - {s['name']}: {s['description']}" for s in all_skills.values()
+    ) if all_skills else "  暂无可用技能"
+
+    tools.register(Tool(
+        name="load_skill",
+        description="加载指定技能的完整说明文档以获取详细指导。当需要使用某个已注册的技能（如代码审查、调试等）时，先调用此工具加载技能的完整文档。",
+        parameters={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": f"要加载的技能名称。可用技能: {skills_list}",
+                },
+            },
+            "required": ["name"],
+        },
+        fn=load_skill,
+    ))
+
     # 注册子 Agent 工具（放在 create_default_tools() 之外，因为子 Agent 不能递归调用自身）
     tools.register(Tool(
         name="subagent",
@@ -613,6 +686,8 @@ def main():
                 "你是一个有用的 AI 助手。你可以使用 bash 工具在本地执行 shell 命令来帮助用户。"
                 "你可以使用 todo_write 工具创建和更新任务规划列表，方便用户跟踪进度。"
                 "你可以使用 subagent 工具将子任务委派给子 Agent 独立执行，适用于需要并行处理的多步骤任务。"
+                "你可以使用 load_skill 工具加载特定技能的完整说明文档。"
+                f"当前已注册的技能:\n{skill_descriptions}\n"
                 "请根据任务需要自主决定何时使用工具。当任务完成时，给出清晰的总结。"
             ),
         }

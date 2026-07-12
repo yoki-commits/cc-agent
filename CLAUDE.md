@@ -37,5 +37,5 @@ learn-deepseek-code/
 - **提问前置**：如果需求有歧义，先澄清再动手
 - **新增工具遵循 tool-spec**：增加新工具时按 `tool-spec.md` 规范执行，不确定时先读取该文件
 - **新增 Hook 遵循 hook-spec**：增加新 Hook 时按 `hook-spec.md` 规范执行，不确定时先读取该文件
-- **同步更新 ARCHITECTURE.md**：新增模块或对已有模块做结构性改动时（不包括修小 bug 或极小改动），同步更新 `ARCHITECTURE.md` 中的模块说明、调用关系或数据流
+- **同步更新 ARCHITECTURE.md**：新增模块或对已有模块做结构性改动时（不包括修小 bug 或极小改动），**必须**同步更新 `ARCHITECTURE.md` 中的模块说明、调用关系、数据流、工具列表、内置 Hooks 表格等内容。
 

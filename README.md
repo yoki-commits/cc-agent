@@ -90,3 +90,73 @@
 
 **提交：** `新增 todo_write 工具 + 任务更新提醒机制`
 
+---
+
+## Phase 6 — 子 Agent 系统
+
+**提示词：**
+
+> 接下来这一部分是加如子Agent的功能。需要完成：
+> 首先把子Agent的这个功能作为一个工具加入到Agent的工具目录里面，就是调用子Agent完成任务，工具的实现和原来的Agent的循环差不多，
+> 有三个区别和原agent，子Agent的工具里面没有调用此Agent的工具。
+> 限制子Agent的循环次数30次，系统提示词和母agent不一样
+
+**实现内容：**
+- `run_subagent(task)` 函数 — 作为 `subagent` 工具的实现
+- 子 Agent 复用 `AgentLoop` 类，与母 Agent 共享循环逻辑
+- **与母 Agent 的差异**：
+  - 工具集不含 `subagent` 自身（防递归），仅含 `bash` 和 `todo_write`
+  - 最大轮数限制为 30 次
+  - 独立于母 Agent 的子任务系统提示词
+- 注册在 `main()` 中（而非 `create_default_tools()`），避免子 Agent 能调用子 Agent
+
+**提交：** `新增 subagent 子 Agent 工具 + 更新 README`
+
+---
+
+## Phase 7 — Skill 系统
+
+**提示词：**
+
+> 现在我们来做这个Skill系统，所有的skill放在skills这个目录下面，目录下面每一个子目录都是一个skill，子目录里面的skill.md是技能介绍
+> 1. 要有一个扫描skill的函数，把所有skill都扫描出来，从skill.md里面，YAML部分有两个字段，一个是name，另一个是description，整个全文是content，把这些内容都读取出来，建立一个字典，key是技能的名字，value里面是包含三个字段的字典
+> 2. 把读取出的name和description列表注入系统提示词，让Agent知道有这个技能
+> 3. 创建一个工具load_skill，当Agent要使用某个对应技能的时候，加载全文
+
+**实现内容：**
+- `skills/` 目录 — 每个子目录一个技能，含 `skill.md`（YAML 头 + Markdown 正文）
+- `scan_skills()` 函数 — 扫描 `skills/` 目录，解析 YAML 头，返回 `{name: {name, description, content}}`
+- `load_skill(name)` 工具 — 返回指定技能的完整文档内容
+- 系统提示词注入技能名称和描述列表
+- **示例技能**：`code-review`、`debugger`、`agent-builder`、`mcp-builder`、`pdf`
+- 新增技能只需在 `skills/` 下新增子目录，无需改代码
+
+**提交：** `新增 Skill 系统 + 更新架构文档 + 协作约定`
+
+---
+
+## Phase 8 — 上下文压缩系统
+
+**提示词：**
+
+> 防止上下文过多，完成对上下文压缩功能的新增，功能分为四层（实际为五层）：
+> 1. 消息裁切，保留最新 47 条 + 最前 3 条
+> 2. 工具结果压缩，保留最近 3 轮
+> 3. 超大消息截断存档（200KB / 30KB）
+> 4. LLM 摘要压缩（80000 字符阈值）
+> 5. 紧急裁切（413 响应时）
+> 前三种在 main 中自动执行，第四种按阈值触发，第五种 API 413 时触发。另加 compact 工具让 Agent 主动调用。
+
+**实现内容：**
+- **五层压缩函数**：
+  - `compact_trim_messages` — 保留前 3 + 后 47 条，中间省略
+  - `compact_tool_results` — 保留最近 3 轮工具结果，更早替换为占位符
+  - `compact_truncate_large` — 单条 > 200KB 时存档到 `.transcripts/`，留 2000 字符预览
+  - `compact_summarize` — 总消息 > 80000 字符时保存完整对话，LLM 生成结构化摘要
+  - `compact_emergency` — 仅保留 system prompt + 简单摘要 + 最后 5 条
+- **`compact` 工具** — Agent 可主动触发第 4 层 LLM 摘要
+- **413 自动恢复** — API 返回 prompt_too_long 时自动紧急裁切并重试
+- 完整对话存档到 `.transcripts/`，随时可恢复
+
+**提交：** `上下文压缩系统`
+

@@ -8,9 +8,11 @@
 """
 
 import json
+import hashlib
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -281,6 +283,14 @@ def load_skill(name: str) -> str:
     if skill is None:
         return f"Error: 技能 '{name}' 不存在。可用技能: {', '.join(all_skills.keys())}"
     return f"## 技能: {skill['name']}\n\n{skill['content']}"
+
+
+# ============================================================
+# 上下文压缩阈值
+# ============================================================
+
+TRANS_DIR = Path(__file__).resolve().parent / ".transcripts"
+COMPACT_CHAR_THRESHOLD = 80000
 
 
 # ============================================================
@@ -607,6 +617,159 @@ def run_subagent(task: str) -> str:
 
 
 # ============================================================
+# 5c. 上下文压缩系统 — 五层压缩
+# ============================================================
+
+def _msg_chars(messages: list[dict]) -> int:
+    """计算 messages 序列化后的字符数"""
+    return len(json.dumps(messages, ensure_ascii=False, default=str))
+
+
+def compact_trim_messages(messages: list[dict]) -> list[dict]:
+    """第 1 层：消息数量裁切 — 保留前 3 条 + 后 47 条"""
+    if len(messages) <= 50:
+        return messages
+    trimmed = list(messages[:3])
+    trimmed.append({
+        "role": "system",
+        "content": f"(中间省略了 {len(messages) - 50} 条消息，已自动压缩)",
+    })
+    trimmed.extend(messages[-47:])
+    return trimmed
+
+
+def compact_tool_results(messages: list[dict]) -> None:
+    """第 2 层：工具结果压缩 — 保留最近 3 轮工具结果，更早的用占位符替换"""
+    # 找到所有轮次边界（assistant 含 tool_calls 的位置）及每条 tool_calls 对应的 tool 消息
+    rounds: list[int] = []  # 每轮起始索引（assistant 消息）
+    for i, m in enumerate(messages):
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            rounds.append(i)
+
+    if len(rounds) <= 3:
+        return
+
+    # 保留最近 3 轮，更早的轮次中的 tool 消息压缩
+    for r_idx in rounds[:-3]:
+        # 从 assistant 消息开始，找紧随的 tool 消息（直到下一条非 tool 消息）
+        j = r_idx + 1
+        while j < len(messages) and messages[j].get("role") == "tool":
+            orig = messages[j].get("content", "")
+            if len(orig) > 0:
+                preview = orig[:100].replace("\n", " ")
+                messages[j]["content"] = (
+                    f"(工具结果已压缩: {preview}...) [可用 compact 工具恢复]"
+                )
+            j += 1
+
+
+def compact_truncate_large(messages: list[dict]) -> None:
+    """第 3 层：截断超大消息 — 最后一条 user 消息 > 200KB 时，存档 > 30KB 的消息"""
+    last_user = None
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            last_user = m
+            break
+    if last_user is None:
+        return
+
+    content_bytes = len(last_user.get("content", "").encode("utf-8"))
+    if content_bytes <= 200 * 1024:
+        return
+
+    TRANS_DIR.mkdir(parents=True, exist_ok=True)
+    ts = int(time.time())
+
+    for i, m in enumerate(messages):
+        text = m.get("content", "")
+        if isinstance(text, str) and len(text.encode("utf-8")) > 30 * 1024:
+            h = hashlib.md5(text.encode("utf-8")).hexdigest()[:8]
+            fname = f"{ts}_{h}.txt"
+            (TRANS_DIR / fname).write_text(text, encoding="utf-8")
+            messages[i]["content"] = (
+                text[:2000] + f"\n[...已存档至 .transcripts/{fname}]"
+            )
+
+
+def compact_summarize(messages: list[dict], client: "LLMClient") -> list[dict]:
+    """第 4 层：LLM 摘要压缩 — 保存完整对话到 .transcripts/，用 LLM 生成摘要"""
+    TRANS_DIR.mkdir(parents=True, exist_ok=True)
+    ts = int(time.time())
+    archive_path = TRANS_DIR / f"{ts}_full.json"
+    archive_path.write_text(
+        json.dumps(messages, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
+    print(f"\n[压缩] 完整对话已存档至 {archive_path}")
+
+    summary_prompt = (
+        "将以下对话历史总结为一段摘要，保留以下内容：\n"
+        "1. current goal - 当前正在完成的目标\n"
+        "2. key findings/decisions - 关键发现和决策\n"
+        "3. files read/changed - 读取/修改的文件列表\n"
+        "4. remaining work - 剩余工作\n"
+        "5. user constraints - 用户给出的约束条件\n"
+        "尽可能简洁，控制在 2000 字以内。\n\n"
+        "对话历史：\n"
+    )
+
+    # 构建摘要请求（不传 tools）
+    summary_messages = [
+        {"role": "user", "content": summary_prompt},
+    ]
+    summary_messages.extend(messages)
+    try:
+        resp = client.chat_completion(summary_messages, tools=None, temperature=0.3)
+        summary = resp["choices"][0]["message"].get("content", "")
+    except Exception as e:
+        summary = f"(摘要生成失败: {e})"
+
+    # 构建精简消息：system prompt 原文 + 摘要 + 最后 10 条
+    new_msgs = [messages[0]]  # system prompt
+    new_msgs.append({
+        "role": "system",
+        "content": f"[对话摘要]\n{summary}",
+    })
+    new_msgs.extend(messages[-10:])
+    print(f"[压缩] 消息从 {len(messages)} 条压缩为 {len(new_msgs)} 条")
+    return new_msgs
+
+
+def compact_emergency(messages: list[dict]) -> list[dict]:
+    """第 5 层：紧急裁切 — 仅保留 system prompt + 简单摘要 + 最后 5 条"""
+    new_msgs = [messages[0]]  # system prompt
+    summaries = []
+    for m in messages[1:-5]:
+        role = m.get("role", "")
+        content = m.get("content", "")
+        if role in ("user", "assistant") and isinstance(content, str) and content:
+            summaries.append(f"[{role}] {content[:200]}")
+    summary_text = " | ".join(summaries[:20])
+    new_msgs.append({
+        "role": "system",
+        "content": f"(紧急压缩) 对话摘要: {summary_text[:3000]}",
+    })
+    new_msgs.extend(messages[-5:])
+    return new_msgs
+
+
+# 模块级引用，供 compact_tool 闭包访问
+_compact_refs: dict = {}
+
+
+def compact_tool(**kwargs) -> str:
+    """compact 工具 — 供 Agent 调用，触发第 4 层 LLM 摘要压缩"""
+    messages = _compact_refs.get("messages")
+    client = _compact_refs.get("client")
+    if messages is None or client is None:
+        return "Error: compact 工具未正确初始化"
+    new_msgs = compact_summarize(messages, client)
+    messages.clear()
+    messages.extend(new_msgs)
+    return "对话已压缩，摘要已生成，完整记录已存档。"
+
+
+# ============================================================
 # 6. 主交互入口 — 管理记忆
 # ============================================================
 
@@ -661,6 +824,18 @@ def main():
         fn=run_subagent,
     ))
 
+    # 注册 compact 工具（供 Agent 主动触发摘要压缩）
+    tools.register(Tool(
+        name="compact",
+        description="压缩对话历史以节省上下文空间。将完整对话存档后生成 LLM 摘要，保留当前目标、关键发现、已操作文件、剩余工作和用户约束等关键信息。",
+        parameters={"type": "object", "properties": {}, "required": []},
+        fn=compact_tool,
+    ))
+
+    # 设置 compact_tool 的模块级引用
+    _compact_refs["client"] = client
+    _compact_refs["messages"] = None  # 下面赋值
+
     # 创建安全审查钩子并注册到 pre_tool_use 阶段
     hooks = HookSystem()
     security = SecurityHook(project_dir=os.getcwd())
@@ -694,6 +869,7 @@ def main():
     ]
 
     agent = AgentLoop(client, tools, hook_system=hooks)
+    _compact_refs["messages"] = messages  # compact 工具需要访问 messages 和 client
 
     while True:
         try:
@@ -711,15 +887,38 @@ def main():
         # 追加用户消息到记忆
         messages.append({"role": "user", "content": user_input})
 
-        # 执行 agent 循环（内部会追加助手消息和工具消息到 messages）
+        # --- 上下文压缩（第 1~3 层）---
+        messages = compact_trim_messages(messages)
+        compact_tool_results(messages)
+        compact_truncate_large(messages)
+
+        # --- 第 4 层：超过阈值则 LLM 摘要 ---
+        if _msg_chars(messages) > COMPACT_CHAR_THRESHOLD:
+            messages = compact_summarize(messages, client)
+
+        # 执行 agent 循环
         try:
             messages = agent.run(messages)
-            # 输出最后一条助手消息
             last_msg = messages[-1]
             print(f"\n{last_msg.get('content', '')}")
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code == 413:
+                print("\n[压缩] 上下文超限，执行紧急裁切...")
+                messages = compact_emergency(messages)
+                try:
+                    messages = agent.run(messages)
+                    last_msg = messages[-1]
+                    print(f"\n{last_msg.get('content', '')}")
+                except Exception as e2:
+                    print(f"\n错误: {e2}")
+                    messages.append({
+                        "role": "assistant",
+                        "content": f"执行出错: {e2}",
+                    })
+            else:
+                raise
         except Exception as e:
             print(f"\n错误: {e}")
-            # 出错时把错误消息加入记忆，对话可以继续
             messages.append({
                 "role": "assistant",
                 "content": f"执行出错: {e}",

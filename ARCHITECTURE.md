@@ -210,6 +210,34 @@ AgentLoop
 - 最大轮数限制为 30 次
 - 系统提示词为独立于母 Agent 的子任务指令
 
+#### 上下文压缩系统 — 五层压缩
+
+**职责：** 防止 messages 列表无限增长，在 `main()` 中 `agent.run()` 前自动压缩。
+
+```
+五层压缩：
+  第 1 层 compact_trim_messages    → 消息数量 > 50 时，保留前 3 + 后 47
+  第 2 层 compact_tool_results     → 保留最近 3 轮工具结果，更早的用占位符替换
+  第 3 层 compact_truncate_large   → 最后一条 user 消息 > 200KB 时，存档 > 30KB 的到 .transcripts/
+  第 4 层 compact_summarize        → 总消息 > 80000 字符时，LLM 生成摘要
+  第 5 层 compact_emergency        → API 返回 413 时，紧急裁切为最后 5 条
+```
+
+**触发链路：**
+```
+main() 每次循环:
+  1~3 层自动执行 → 检查阈值 → 超限则第 4 层 → agent.run()
+  → 如果 API 返回 413 → 第 5 层 → 重试 agent.run()
+
+Agent 也可通过 compact 工具主动触发第 4 层
+```
+
+**关键设计：**
+- **透明压缩**：前 3 层每次 `agent.run()` 前自动执行，Agent 无感知
+- **LLM 摘要**：第 4 层调用 LLM 生成结构化摘要（保留目标、发现、文件、剩余工作、约束）
+- **完整存档**：压缩前完整对话保存到 `.transcripts/`，随时可恢复
+- **优雅降级**：第 5 层不依赖 LLM，纯文本拼接确保 413 后可恢复
+
 ---
 
 ### ⑦ main()
